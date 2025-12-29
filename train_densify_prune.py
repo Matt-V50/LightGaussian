@@ -4,6 +4,7 @@
 #
 # For inquiries contact george.drettakis@inria.fr
 #
+import json
 import os
 import torch
 from random import randint
@@ -39,7 +40,42 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+class Timer:
+    def __init__(self):
+        self._iter_start = torch.cuda.Event(enable_timing = True)
+        self._iter_end = torch.cuda.Event(enable_timing = True)
+        self._optim_start = torch.cuda.Event(enable_timing = True)
+        self._optim_end = torch.cuda.Event(enable_timing = True)
+        self.total_render_time = 0.0
+        self.total_optim_time = 0.0
+    
+    def iter_start(self):
+        self._iter_start.record()
+    
+    def iter_end(self):
+        self._iter_end.record()
+        torch.cuda.synchronize()
+        self.total_render_time += self._iter_start.elapsed_time(self._iter_end) / 1e3 # ms to s
 
+    def optim_start(self):
+        self._optim_start.record()
+
+    def optim_end(self):
+        self._optim_end.record()
+        torch.cuda.synchronize()
+        self.total_optim_time += self._optim_start.elapsed_time(self._optim_end) / 1e3 # ms to s
+        
+    @property
+    def total_times(self):
+        return self.total_render_time + self.total_optim_time
+
+    @property
+    def metrics(self):
+        return {
+            "train_times": self.total_times,
+            "train_render_times": self.total_render_time,
+            "train_optimal_times": self.total_optim_time
+        }
 def training(
     dataset,
     opt,
@@ -52,7 +88,7 @@ def training(
     args,
 ):
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
+    
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -71,6 +107,7 @@ def training(
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     gaussians.scheduler = ExponentialLR(gaussians.optimizer, gamma=0.97)
+    timer = Timer()
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -105,7 +142,7 @@ def training(
             except Exception as e:
                 network_gui.conn = None
 
-        iter_start.record()
+        timer.iter_start()
 
         gaussians.update_learning_rate(iteration)
 
@@ -138,7 +175,7 @@ def training(
         )
         loss.backward()
 
-        iter_end.record()
+        timer.iter_end()
 
         with torch.no_grad():
             # Progress bar
@@ -153,18 +190,19 @@ def training(
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-            training_report(
-                tb_writer,
-                iteration,
-                Ll1,
-                loss,
-                l1_loss,
-                iter_start.elapsed_time(iter_end),
-                testing_iterations,
-                scene,
-                render,
-                (pipe, background),
-            )
+            # training_report(
+            #     tb_writer,
+            #     iteration,
+            #     Ll1,
+            #     loss,
+            #     l1_loss,
+            #     iter_start.elapsed_time(iter_end),
+            #     testing_iterations,
+            #     scene,
+            #     render,
+            #     (pipe, background),
+            # )
+            timer.optim_start()
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -210,6 +248,8 @@ def training(
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+            
+            timer.optim_end()
 
             if iteration in checkpoint_iterations:
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -223,6 +263,8 @@ def training(
                     gaussian_list, imp_list = prune_list(gaussians, scene, pipe, background)
                     v_list = calculate_v_imp_score(gaussians, imp_list, args.v_pow)
                     np.savez(os.path.join(scene.model_path,"imp_score"), v_list.cpu().detach().numpy()) 
+    with open(os.path.join(args.model_path, "training_time.json"), 'w') as f:
+        json.dump(timer.metrics, f)
 
 
 if __name__ == "__main__":
@@ -265,6 +307,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    tb_writer = prepare_output_and_logger(args)
     training(
         lp.extract(args),
         op.extract(args),

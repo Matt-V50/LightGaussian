@@ -60,6 +60,13 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["Blender"](
                 args.source_path, args.white_background, args.eval
             )
+        elif "S3DIS" in args.source_path and os.path.exists(os.path.join(args.source_path, "transforms.json")) :
+            print("Found s3dis file, assuming S3DIS data set!")
+            scene_info = sceneLoadTypeCallbacks["S3DIS"](args.source_path, args.white_background, args.eval, images=args.images)
+        elif os.path.exists(os.path.join(args.source_path, "transforms.json")):
+            print("Found transforms.json file, assuming Lerf data set!")
+            scene_info = sceneLoadTypeCallbacks["Lerf"](args.source_path, args.white_background, args.eval, images=args.images)
+
         else:
             assert False, "Could not recognize scene type!"
 
